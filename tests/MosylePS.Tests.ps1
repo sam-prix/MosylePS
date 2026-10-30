@@ -361,6 +361,101 @@ InModuleScope MosylePS {
         }
     }
 
+    Describe 'Mosyle device searches without OS' {
+        BeforeEach {
+            $apiToken = ConvertTo-SecureString 'fake-api-token' -AsPlainText -Force
+            $jwt = ConvertTo-SecureString 'fake.jwt.token' -AsPlainText -Force
+            Connect-Mosyle -AccessToken $apiToken -BearerToken $jwt | Out-Null
+            $script:DeviceSearchRequests = @()
+            $script:DeviceSearchFailure = $false
+            Mock Invoke-WebRequest {
+                $request = [text.encoding]::UTF8.GetString($Body) | ConvertFrom-Json
+                $script:DeviceSearchRequests += $request
+                if ($script:DeviceSearchFailure -and $request.options.os -eq 'mac') { throw 'fake failure' }
+                $page = 1
+                if ($request.options.PSObject.Properties['page']) { $page = $request.options.page }
+                $devices = @()
+                if ($page -le 2) {
+                    $devices = @(@{ deviceudid = "$($request.options.os)-$page"; os = $request.options.os })
+                    if ($request.options.PSObject.Properties['only_deviceudid'] -and $request.options.only_deviceudid) {
+                        $devices = @("$($request.options.os)-$page")
+                    }
+                }
+                [pscustomobject]@{
+                    Headers = @{}
+                    Content = (ConvertTo-Json -InputObject @{
+                        status = 'OK'; response = @(@{ devices = $devices; page = $page })
+                    } -Depth 10)
+                }
+            }
+        }
+
+        It 'searches one page of each OS with all supplied filters and does not mutate Options' {
+            $options = @{ serial_numbers = 'SERIAL'; supervised = $false }
+            $devices = @(Get-MosyleDevice -Options $options -DeviceUdid 'UDID' -Model 'MODEL' `
+                -OSVersion '1.0' -Tag 'TAG' -EnrollDateStart 0 -EnrollDateEnd 100 `
+                -UpdateDateStart 200 -UpdateDateEnd 300 -SpecificColumns deviceudid -Page 2 -PageSize 10)
+            ($devices.os -join ',') | Should Be 'ios,mac,tvos,visionos'
+            $script:DeviceSearchRequests.Count | Should Be 4
+            foreach ($request in $script:DeviceSearchRequests) {
+                $request.options.serial_numbers[0] | Should Be 'SERIAL'
+                $request.options.deviceudids[0] | Should Be 'UDID'
+                $request.options.models[0] | Should Be 'MODEL'
+                $request.options.osversions[0] | Should Be '1.0'
+                $request.options.tags[0] | Should Be 'TAG'
+                $request.options.supervised | Should Be $false
+                $request.options.enrolldate_start | Should Be 0
+                $request.options.enrolldate_end | Should Be 100
+                $request.options.updatedate_start | Should Be 200
+                $request.options.updatedate_end | Should Be 300
+                $request.options.specific_columns[0] | Should Be 'deviceudid'
+                $request.options.page | Should Be 2
+                $request.options.page_size | Should Be 10
+            }
+            $options.Count | Should Be 2
+            ($options.serial_numbers -is [string]) | Should Be $true
+        }
+
+        It 'restarts pagination for each OS and retains UDID-only output' {
+            $devices = @(Get-MosyleDevice -OnlyDeviceUdid -All)
+            ($devices -join ',') | Should Be 'ios-1,ios-2,mac-1,mac-2,tvos-1,tvos-2,visionos-1,visionos-2'
+            ($script:DeviceSearchRequests.options.page -join ',') | Should Be '1,2,3,1,2,3,1,2,3,1,2,3'
+            foreach ($request in $script:DeviceSearchRequests) {
+                $request.options.only_deviceudid | Should Be $true
+            }
+        }
+
+        It 'returns original Raw envelopes for every OS and terminal page' {
+            $envelopes = @(Get-MosyleDevice -Raw)
+            $envelopes.Count | Should Be 4
+            $envelopes[0].response[0].devices[0].os | Should Be 'ios'
+            $script:DeviceSearchRequests = @()
+            $envelopes = @(Get-MosyleDevice -All -Raw)
+            $envelopes.Count | Should Be 12
+            @($envelopes | Where-Object { $_.response[0].devices.Count -eq 0 }).Count | Should Be 4
+        }
+
+        It 'keeps explicit OS searches restricted to one OS' {
+            @(Get-MosyleDevice -OS mac).Count | Should Be 1
+            @(Get-MosyleDevice -Options @{ os = 'tvos' }).Count | Should Be 1
+            ($script:DeviceSearchRequests.options.os -join ',') | Should Be 'mac,tvos'
+        }
+
+        It 'rejects invalid filters and explicit pages with All before making requests' {
+            (Test-MosyleFailure { Get-MosyleDevice -All -Page 1 }) | Should Be $true
+            (Test-MosyleFailure { Get-MosyleDevice -All -Options @{ page = 2 } }) | Should Be $true
+            (Test-MosyleFailure { Get-MosyleDevice -Options @{ supervised = 'false' } }) | Should Be $true
+            (Test-MosyleFailure { Get-MosyleDevice -EnrollDateStart 10 }) | Should Be $true
+            Assert-MockCalled Invoke-WebRequest -Times 0 -Exactly -Scope It
+        }
+
+        It 'stops on an OS request failure rather than silently skipping it' {
+            $script:DeviceSearchFailure = $true
+            (Test-MosyleFailure { Get-MosyleDevice -SerialNumber 'SERIAL' }) | Should Be $true
+            ($script:DeviceSearchRequests.options.os -join ',') | Should Be 'ios,mac'
+        }
+    }
+
     Describe 'Mosyle assigned-user device lookup' {
         BeforeEach {
             $apiToken = ConvertTo-SecureString 'fake-api-token' -AsPlainText -Force
@@ -704,9 +799,10 @@ InModuleScope MosylePS {
             $options.Count | Should Be 3
         }
 
-        It 'rejects missing OS, unsupported filters, duplicate keys and invalid option types before HTTP' {
+        It 'rejects invalid OS, unsupported filters, duplicate keys and invalid option types before HTTP' {
             $invalidOptions = @(
-                @{}, @{ os = 'windows' }, @{ os = 'mac'; userid = 'sprice' },
+                @{ os = 'windows' }, @{ os = $null }, @{ os = '' }, @{ os = @('mac') },
+                @{ os = 'mac'; userid = 'sprice' },
                 @{ os = 'mac'; HostName = 'Mac' }, @{ os = 'mac'; serial_numbers = @() },
                 @{ os = 'mac'; tags = @('valid', ' ') }, @{ os = 'mac'; supervised = 'false' },
                 @{ os = 'mac'; only_deviceudid = 1 }, @{ os = 'mac'; page = 0 },

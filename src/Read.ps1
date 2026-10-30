@@ -3,11 +3,12 @@ function Get-MosyleDevice {
     .SYNOPSIS
     Lists devices using server-side filters, optionally traversing every page.
     .DESCRIPTION
-    Requires OS, either directly or in Options. Filters are sent inside the
+    Without OS, searches ios, mac, tvos, and visionos sequentially using the same
+    filters. Filters are sent inside the
     API options object. Duplicate options are rejected, not silently overridden.
     User ID and hostname are return columns, not documented server-side filters.
     .PARAMETER OS
-    Required operating system: ios, mac, tvos, or visionos.
+    Operating system: ios, mac, tvos, or visionos. Defaults to searching all four.
     .PARAMETER DeviceUdid
     Device UDIDs to search for.
     .PARAMETER SerialNumber
@@ -35,7 +36,7 @@ function Get-MosyleDevice {
     .PARAMETER SpecificColumns
     Device attributes to return, such as serial_number, device_name, or userid.
     .PARAMETER Page
-    One-based page number. The API default is 1.
+    One-based page number, applied to each searched OS. The API default is 1.
     .PARAMETER PageSize
     Number of records requested per page. The API default is 50.
     .PARAMETER Options
@@ -43,11 +44,13 @@ function Get-MosyleDevice {
     .PARAMETER Raw
     Returns the full API envelope, including page metadata. With All, emits one envelope per request.
     .PARAMETER All
-    Retrieves pages sequentially from page 1 until an empty response.
+    Retrieves pages sequentially from page 1 until an empty response for each OS.
     Cannot be combined with Page, including page in Options. Retries HTTP 429
     up to five times per page, delaying only after a rate-limit response.
     .EXAMPLE
     Get-MosyleDevice -OS mac -SerialNumber 'SERIAL1', 'SERIAL2'
+    .EXAMPLE
+    Get-MosyleDevice -SerialNumber 'SERIAL1' -All
     .EXAMPLE
     Get-MosyleDevice -OS mac -SpecificColumns device_name,serial_number,userid,HostName -Page 2 -PageSize 50
     #>
@@ -92,10 +95,12 @@ function Get-MosyleDevice {
             $requestOptions[$key] = $PSBoundParameters[$name]
         }
     }
-    if (-not $requestOptions.ContainsKey('os') -or $requestOptions.os -notin @('ios', 'mac', 'tvos', 'visionos')) {
-        throw 'A valid OS is required. Specify -OS or -Options @{ os = ... }.'
+    if ($requestOptions.ContainsKey('os')) {
+        if ($requestOptions.os -isnot [string] -or $requestOptions.os -notin @('ios', 'mac', 'tvos', 'visionos')) {
+            throw 'OS must be ios, mac, tvos, or visionos when specified.'
+        }
+        $requestOptions.os = $requestOptions.os.ToLowerInvariant()
     }
-    $requestOptions.os = $requestOptions.os.ToLowerInvariant()
     foreach ($key in @('deviceudids', 'serial_numbers', 'models', 'osversions', 'tags', 'specific_columns')) {
         if ($requestOptions.ContainsKey($key)) {
             $values = @($requestOptions[$key])
@@ -135,10 +140,18 @@ function Get-MosyleDevice {
             throw "Device-list option '$start' must not exceed '$end'."
         }
     }
+    if ($All -and $requestOptions.ContainsKey('page')) { throw '-All cannot be combined with an explicit page.' }
+    if (-not $requestOptions.ContainsKey('os')) {
+        foreach ($deviceOS in @('ios', 'mac', 'tvos', 'visionos')) {
+            $osOptions = $requestOptions.Clone()
+            $osOptions.os = $deviceOS
+            Get-MosyleDevice -Options $osOptions -All:$All -Raw:$Raw
+        }
+        return
+    }
     if (-not $All) {
         return Get-MosyleList -Endpoint devices -Operation list -Property devices -Options $requestOptions -Raw:$Raw
     }
-    if ($requestOptions.ContainsKey('page')) { throw '-All cannot be combined with an explicit page.' }
     $requestOptions.page = 1
     if (-not $requestOptions.ContainsKey('page_size')) { $requestOptions.page_size = 50 }
     while ($true) {

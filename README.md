@@ -107,7 +107,8 @@ $page.response
 ```
 
 By default, list commands emit the records in **one server response**, not the entire
-tenant inventory. `-Raw` returns the unmodified parsed envelope, including
+tenant inventory. When device OS is omitted, `Get-MosyleDevice` requests one page
+per supported OS instead. `-Raw` returns the unmodified parsed envelope, including
 `page`, `page_size`, `rows`, or `rows_count` where supplied.
 The additional device-list documentation specifies `page` (default 1) and
 `page_size` (default 50). Use `-Page` and `-PageSize` to request a particular
@@ -118,6 +119,7 @@ device page. Other list endpoints retain their original `-Options` behavior.
 ```powershell
 Get-MosyleDevice -OS mac -All
 Get-MosyleDevice -OS mac -All -Tag 'Engineering' -PageSize 100
+Get-MosyleDevice -SerialNumber 'SERIAL1' -All
 
 # Retrieve full details of devices assigned to matching users:
 Get-MosyleUserDevice -Identifier 'jsmith' -OS mac
@@ -167,9 +169,13 @@ cause omissions or duplicates.
 
 ### Device filters
 
-Device OS is required: specify `-OS ios|mac|tvos|visionos` or the `os` option.
-Calls without OS now fail locally instead of sending a request that the API
-would reject with `MISSING_DATA`.
+Device OS is optional: specify `-OS ios|mac|tvos|visionos` or the `os` option
+to search one OS. When neither is supplied, the command searches `ios`, `mac`,
+`tvos`, and `visionos` sequentially with the same filters. An explicitly invalid
+OS is still rejected. `-Page` and `-PageSize` apply to each OS; `-All` traverses
+every page independently for each OS. `-Raw` emits each original response
+envelope, including empty/not-found responses. A failure stops the search;
+records already emitted may represent incomplete results.
 
 | Parameter | API option |
 |---|---|

@@ -5,7 +5,7 @@ Describe 'MosylePS manifest and public surface' {
     It 'imports a valid PowerShell 5.1 manifest with only the intended commands' {
         $manifest = Test-ModuleManifest $modulePath
         $manifest.PowerShellVersion.ToString() | Should Be '5.1'
-        @(Get-Command -Module MosylePS).Count | Should Be 19
+        @(Get-Command -Module MosylePS).Count | Should Be 20
         @(Get-Command -Module MosylePS -Name Send-MosyleHttp -ErrorAction SilentlyContinue).Count | Should Be 0
     }
 
@@ -361,6 +361,227 @@ InModuleScope MosylePS {
         }
     }
 
+    Describe 'Mosyle assigned-user device lookup' {
+        BeforeEach {
+            $apiToken = ConvertTo-SecureString 'fake-api-token' -AsPlainText -Force
+            $jwt = ConvertTo-SecureString 'fake.jwt.token' -AsPlainText -Force
+            Connect-Mosyle -AccessToken $apiToken -BearerToken $jwt | Out-Null
+            $script:LookupRequests = @()
+            $script:LookupMode = 'Normal'
+            $script:UserThrottle = $false
+            Mock Start-Sleep {}
+            Mock Get-Random { 0 }
+            Mock Invoke-WebRequest {
+                $request = [text.encoding]::UTF8.GetString($Body) | ConvertFrom-Json
+                $script:LookupRequests += $request
+                $page = $request.options.page
+                if ($request.operation -eq 'list_users') {
+                    if ($script:UserThrottle) {
+                        $script:UserThrottle = $false
+                        $exception = New-Object InvalidOperationException 'fake throttling'
+                        $exception | Add-Member -NotePropertyName Response -NotePropertyValue ([pscustomobject]@{
+                            StatusCode = 429; Headers = @{ 'Retry-After' = '1' }
+                        })
+                        throw $exception
+                    }
+                    if ($script:LookupMode -eq 'UserError') { throw 'fake user failure' }
+                    $entry = @{ status = 'USERS_NOTFOUND' }
+                    if ($page -eq 1 -and $script:LookupMode -ne 'NoUsers') {
+                        $user = @{
+                            iduser = '1111'
+                            assigned_devices = @(@{ deviceUdId = 'MAC1' }, @{ deviceUdId = 'IOS1' })
+                        }
+                        switch ($script:LookupMode) {
+                            'NoAssignments' { $user.assigned_devices = @() }
+                            'MissingAssignments' { $user.Remove('assigned_devices') }
+                            'NullAssignments' { $user.assigned_devices = $null }
+                            'BadAssignment' { $user.assigned_devices = @(@{ serial_number = 'SERIAL' }) }
+                            'EmptyUdid' { $user.assigned_devices = @(@{ deviceUdId = ' ' }) }
+                        }
+                        $entry = @{ users = @($user); page = 1 }
+                        if ($script:LookupMode -eq 'BadUserPage') { $entry.page = 2 }
+                    }
+                    elseif ($page -eq 2 -and $script:LookupMode -eq 'Normal') {
+                        $entry = @{
+                            users = @(@{
+                                iduser = '2222'
+                                assigned_devices = @(@{ deviceUdId = 'MAC1' }, @{ deviceUdId = 'MAC2' })
+                            })
+                            page = 2
+                        }
+                    }
+                }
+                elseif ($request.operation -eq 'list') {
+                    if ($script:LookupMode -eq 'DeviceError') { throw 'fake device failure' }
+                    $entry = @{ status = 'DEVICES_NOTFOUND' }
+                    if (($request.options.os -eq 'mac' -and $page -le 2) -or
+                        ($request.options.os -eq 'ios' -and $page -eq 1)) {
+                        $udid = 'IOS1'
+                        if ($request.options.os -eq 'mac') { $udid = "MAC$page" }
+                        $device = @{
+                            deviceudid = $udid; os = $request.options.os
+                            device_name = "Device $udid"; serial_number = "SERIAL-$udid"
+                            CustomDeviceAttributes = @{ asset = 'example' }
+                        }
+                        if ($script:LookupMode -eq 'BadDevice') { $device.Remove('deviceudid') }
+                        if ($script:LookupMode -eq 'DuplicateDevice') { $device.deviceudid = 'MAC1' }
+                        $entry = @{ devices = @($device); page = $page }
+                    }
+                }
+                else { throw 'Unexpected operation in assigned-device lookup' }
+                [pscustomobject]@{
+                    Headers = @{}
+                    Content = (ConvertTo-Json -InputObject @{ status = 'OK'; response = @($entry) } -Depth 15)
+                }
+            }
+        }
+
+        It 'retrieves every user and device page and preserves full details with an OS filter' {
+            $devices = @(Get-MosyleUserDevice -Email 'admin@example.invalid' -OS mac -PageSize 1)
+            ($devices.deviceudid -join ',') | Should Be 'MAC1,MAC2'
+            $devices[0].serial_number | Should Be 'SERIAL-MAC1'
+            $devices[0].CustomDeviceAttributes.asset | Should Be 'example'
+            $users = @($script:LookupRequests | Where-Object operation -eq 'list_users')
+            ($users.options.page -join ',') | Should Be '1,2,3'
+            foreach ($request in $users) {
+                $request.options.assigned_devices | Should Be $true
+                $request.options.emails[0] | Should Be 'admin@example.invalid'
+                $request.options.page_size | Should Be 1
+            }
+            $requests = @($script:LookupRequests | Where-Object operation -eq 'list')
+            ($requests.options.page -join ',') | Should Be '1,2,3'
+            foreach ($request in $requests) {
+                $request.options.os | Should Be 'mac'
+                ($request.options.deviceudids -join ',') | Should Be 'MAC1,IOS1,MAC2'
+                $request.options.page_size | Should Be 1
+                @($request.options.PSObject.Properties.Name) -contains 'specific_columns' | Should Be $false
+            }
+        }
+
+        It 'searches all four OSes when omitted and supports multiple explicit OSes' {
+            $devices = @(Get-MosyleUserDevice -Identifier 'example.admin')
+            ($devices.deviceudid -join ',') | Should Be 'IOS1,MAC1,MAC2'
+            $requests = @($script:LookupRequests | Where-Object operation -eq 'list')
+            (($requests.options.os | Select-Object -Unique) -join ',') | Should Be 'ios,mac,tvos,visionos'
+            $script:LookupRequests = @()
+            @(Get-MosyleUserDevice -Identifier 'example.admin' -OS mac,ios,mac).Count | Should Be 3
+            $requests = @($script:LookupRequests | Where-Object operation -eq 'list')
+            ($requests | Where-Object { $_.options.os -eq 'mac' }).Count | Should Be 3
+        }
+
+        It 'forwards all major user filters without a Name variable collision' {
+            Get-MosyleUserDevice -IdUser 1111 -Type ADMIN -Identifier 'example.admin' `
+                -IdUserGroup 1000 -Name 'Example Admin' -NameLike 'Example' `
+                -Email 'admin@example.invalid' -OS mac | Out-Null
+            $options = $script:LookupRequests[0].options
+            $options.idusers[0] | Should Be 1111
+            $options.types[0] | Should Be 'ADMIN'
+            $options.identifiers[0] | Should Be 'example.admin'
+            $options.idusergroups[0] | Should Be 1000
+            $options.names[0] | Should Be 'Example Admin'
+            $options.name_like | Should Be 'Example'
+            $options.emails[0] | Should Be 'admin@example.invalid'
+        }
+
+        It 'makes no device requests when users or assignments are empty' {
+            foreach ($mode in @('NoUsers', 'NoAssignments')) {
+                $script:LookupMode = $mode
+                @(Get-MosyleUserDevice -IdUser 1111).Count | Should Be 0
+            }
+            @($script:LookupRequests | Where-Object operation -eq 'list').Count | Should Be 0
+        }
+
+        It 'rejects malformed assignments and bad user metadata before querying devices' {
+            foreach ($mode in @('MissingAssignments', 'NullAssignments', 'BadAssignment', 'EmptyUdid', 'BadUserPage')) {
+                $script:LookupMode = $mode
+                (Test-MosyleFailure { Get-MosyleUserDevice -IdUser 1111 }) | Should Be $true
+            }
+            @($script:LookupRequests | Where-Object operation -eq 'list').Count | Should Be 0
+        }
+
+        It 'propagates user and device failures and rejects malformed device records' {
+            foreach ($mode in @('UserError', 'DeviceError', 'BadDevice')) {
+                $script:LookupMode = $mode
+                (Test-MosyleFailure { Get-MosyleUserDevice -IdUser 1111 -OS mac }) | Should Be $true
+            }
+        }
+
+        It 'emits each returned device only once' {
+            $script:LookupMode = 'DuplicateDevice'
+            $devices = @(Get-MosyleUserDevice -IdUser 1111 -OS mac)
+            $devices.Count | Should Be 1
+            $devices[0].deviceudid | Should Be 'MAC1'
+        }
+
+        It 'retries throttled user reads on the same page' {
+            $script:UserThrottle = $true
+            @(Get-MosyleUserDevice -IdUser 1111 -OS mac).Count | Should Be 2
+            $requests = @($script:LookupRequests | Where-Object operation -eq 'list_users')
+            ($requests.options.page -join ',') | Should Be '1,1,2,3'
+            Assert-MockCalled Start-Sleep -Times 1 -Exactly -Scope It -ParameterFilter { $Milliseconds -eq 1000 }
+        }
+
+        It 'rejects missing user filters, invalid OSes and invalid page sizes before HTTP' {
+            (Test-MosyleFailure { Get-MosyleUserDevice -OS mac }) | Should Be $true
+            (Test-MosyleFailure { Get-MosyleUserDevice -IdUser 1111 -OS windows }) | Should Be $true
+            (Test-MosyleFailure { Get-MosyleUserDevice -IdUser 1111 -PageSize 0 }) | Should Be $true
+            Assert-MockCalled Invoke-WebRequest -Times 0 -Exactly -Scope It
+        }
+    }
+
+    Describe 'Mosyle user filter serialization' {
+        BeforeEach {
+            $apiToken = ConvertTo-SecureString 'fake-api-token' -AsPlainText -Force
+            $jwt = ConvertTo-SecureString 'fake.jwt.token' -AsPlainText -Force
+            Connect-Mosyle -AccessToken $apiToken -BearerToken $jwt | Out-Null
+            $script:LastBody = $null
+            Mock Invoke-WebRequest {
+                $script:LastBody = [text.encoding]::UTF8.GetString($Body) | ConvertFrom-Json
+                [pscustomobject]@{
+                    Headers = @{}
+                    Content = '{"status":"OK","response":[{"users":[{"iduser":"1111"}]}]}'
+                }
+            }
+        }
+
+        It 'serializes a typed user type filter into a JSON array' {
+            (Get-MosyleUser -Type ADMIN).iduser | Should Be '1111'
+            $script:LastBody.operation | Should Be 'list_users'
+            ($script:LastBody.options.types -is [array]) | Should Be $true
+            $script:LastBody.options.types[0] | Should Be 'ADMIN'
+            @($script:LastBody.options.PSObject.Properties).Count | Should Be 1
+            Assert-MockCalled Invoke-WebRequest -Times 1 -Exactly -Scope It
+        }
+
+        It 'preserves exact names while mapping other typed filters' {
+            Get-MosyleUser -Name 'Example Admin', 'Other Admin' -Type ADMIN `
+                -IdUser 1111 -IdUserGroup 1000 -Identifier 'example.admin' `
+                -NameLike 'Admin' -Email 'example@example.invalid' -Page 2 -PageSize 25 |
+                Out-Null
+            $options = $script:LastBody.options
+            ($options.names -join ',') | Should Be 'Example Admin,Other Admin'
+            $options.types[0] | Should Be 'ADMIN'
+            $options.idusers[0] | Should Be 1111
+            $options.idusergroups[0] | Should Be 1000
+            $options.identifiers[0] | Should Be 'example.admin'
+            $options.name_like | Should Be 'Admin'
+            $options.emails[0] | Should Be 'example@example.invalid'
+            $options.page | Should Be 2
+            $options.page_size | Should Be 25
+        }
+
+        It 'supports unfiltered reads and combines distinct Options with typed filters' {
+            Get-MosyleUser | Out-Null
+            @($script:LastBody.PSObject.Properties.Name) -contains 'options' | Should Be $false
+            $options = @{ names = @('Example Admin'); assigned_devices = $true }
+            Get-MosyleUser -Type ADMIN -Options $options | Out-Null
+            $script:LastBody.options.names[0] | Should Be 'Example Admin'
+            $script:LastBody.options.types[0] | Should Be 'ADMIN'
+            $script:LastBody.options.assigned_devices | Should Be $true
+            $options.Count | Should Be 2
+        }
+    }
+
     Describe 'Mosyle response contracts and safe write operations' {
         BeforeEach {
             $script:Connection = $null
@@ -398,7 +619,7 @@ InModuleScope MosylePS {
             @(Get-MosyleUserGroup -Options @{ return_only_ids = $true }).Count | Should Be 2
             $script:LastBody.operation | Should Be 'list_usergroup'
             $script:TestContent = '{"status":"OK","response":{"devicegroups":[{"id":"dgroup.01"}],"rows_count":1,"page":1}}'
-            (Get-MosyleDeviceGroup).id | Should Be 'dgroup.01'
+            (Get-MosyleDeviceGroup -OS mac).id | Should Be 'dgroup.01'
             $script:LastBody.operation | Should Be 'list_devicegroup'
         }
 

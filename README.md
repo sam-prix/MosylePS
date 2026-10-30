@@ -119,10 +119,24 @@ device page. Other list endpoints retain their original `-Options` behavior.
 Get-MosyleDevice -OS mac -All
 Get-MosyleDevice -OS mac -All -Tag 'Engineering' -PageSize 100
 
-# Search all device pages for an assigned user:
-Get-MosyleDevice -OS mac -All -SpecificColumns device_name,serial_number,userid |
-    Where-Object { $_.userid -eq 'jsmith' }
+# Retrieve full details of devices assigned to matching users:
+Get-MosyleUserDevice -Identifier 'jsmith' -OS mac
+Get-MosyleUserDevice -Type ADMIN -Email 'admin@example.invalid'
+Get-MosyleUserDevice -IdUserGroup 1000 -OS mac,ios
 ```
+
+`Get-MosyleUserDevice` supports `-IdUser`, `-Type`, `-Identifier`, `-IdUserGroup`,
+`-Name`, `-NameLike`, and `-Email`, with the same filtering semantics as
+`Get-MosyleUser`. At least one user filter is required. It retrieves all matching
+user pages with `assigned_devices = true`, then retrieves all device pages
+filtered by those assignments' `deviceUdId` values. Without `-OS`, it searches
+`ios`, `mac`, `tvos`, and `visionos`; one or more OS values can narrow the lookup.
+`-PageSize` controls both user and device page sizes (default 50).
+The command emits full, unmodified device records once per UDID, not user
+records. No matching users or empty assignment arrays produce no output and no
+device requests. Missing or malformed assignment data raises an error rather
+than silently returning incomplete results. If a later device request fails,
+previously emitted records may already have been consumed.
 
 `-All` starts at page 1 and preserves the same filters and columns for every
 request. It cannot be combined with `-Page` or `page` in `-Options`.
@@ -133,7 +147,8 @@ This normally requires one final empty-page request.
 Non-empty pages must report the requested page number; missing or mismatched
 page metadata terminates the operation rather than risking a loop.
 
-Only `-All` device reads retry HTTP **429**: at most **five retries per page**
+`-All` device and user reads (including `Get-MosyleUserDevice`) retry HTTP **429**:
+at most **five retries per page**
 (six attempts). `Retry-After` seconds and HTTP-date values are honored; absent
 or invalid headers use exponential waits of 2, 4, 8, 16, and 32 seconds.
 A minimum one-second wait and up to 999 milliseconds of positive jitter avoid

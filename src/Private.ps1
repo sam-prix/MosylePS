@@ -136,8 +136,10 @@ function Invoke-MosyleOperation {
         [hashtable]$Parameters = @{},
         [switch]$RetryRateLimit
     )
-    if ($RetryRateLimit -and ($Endpoint -ne 'devices' -or $Operation -ne 'list')) {
-        throw 'Rate-limit retries are supported only for device-list reads.'
+    $isDeviceList = $Endpoint -eq 'devices' -and $Operation -eq 'list'
+    $isUserList = $Endpoint -eq 'users' -and $Operation -eq 'list_users'
+    if ($RetryRateLimit -and -not ($isDeviceList -or $isUserList)) {
+        throw 'Rate-limit retries are supported only for device-list and user-list reads.'
     }
     if (-not $script:Connection) { throw 'Not connected. Run Connect-Mosyle first.' }
     $headers = @{ accesstoken = ConvertFrom-MosyleSecret $script:Connection.AccessToken }
@@ -157,7 +159,8 @@ function Invoke-MosyleOperation {
         $response = Send-MosyleHttp -Uri ($script:Connection.BaseUri + '/' + $Endpoint) `
             -Headers $headers -Body $body -TimeoutSec $script:Connection.TimeoutSec -RetryRateLimit:$RetryRateLimit
         $allowedStatus = @()
-        if ($Endpoint -eq 'devices' -and $Operation -eq 'list') { $allowedStatus = @('DEVICES_NOTFOUND') }
+        if ($isDeviceList) { $allowedStatus = @('DEVICES_NOTFOUND') }
+        if ($isUserList) { $allowedStatus = @('USERS_NOTFOUND') }
         $result = ConvertFrom-MosyleResponse $response -AllowedStatus $allowedStatus
         Write-MosyleLog "Success endpoint=$Endpoint operation=$Operation"
         $result
@@ -183,6 +186,10 @@ function Get-MosyleList {
     foreach ($page in @($result.response)) {
         if ($Endpoint -eq 'devices' -and $Operation -eq 'list' -and
             $page.PSObject.Properties['status'] -and $page.status -eq 'DEVICES_NOTFOUND') {
+            continue
+        }
+        if ($Endpoint -eq 'users' -and $Operation -eq 'list_users' -and
+            $page.PSObject.Properties['status'] -and $page.status -eq 'USERS_NOTFOUND') {
             continue
         }
         if (-not $page.PSObject.Properties[$Property]) {

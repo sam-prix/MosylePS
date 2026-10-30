@@ -9,6 +9,7 @@
     FunctionsToExport = @(
         'Connect-Mosyle', 'Disconnect-Mosyle', 'Get-MosyleConnection',
         'Get-MosyleDevice', 'Get-MosyleUser', 'Get-MosyleUserGroup', 'Get-MosyleDeviceGroup',
+        'Get-MosyleUserDevice',
         'Set-MosyleDevice', 'Set-MosyleDeviceUser', 'Restart-MosyleDevice', 'Stop-MosyleDevice',
         'New-MosyleUser', 'Set-MosyleUser', 'New-MosyleUserGroup', 'Set-MosyleUserGroup',
         'Add-MosyleUserGroupMember', 'Remove-MosyleUserGroupMember',

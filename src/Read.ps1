@@ -45,7 +45,7 @@ function Get-MosyleDevice {
     .PARAMETER All
     Retrieves pages sequentially from page 1 until an empty response.
     Cannot be combined with Page, including page in Options. Retries HTTP 429
-    up to five times per page and waits one second between successful pages.
+    up to five times per page, delaying only after a rate-limit response.
     .EXAMPLE
     Get-MosyleDevice -OS mac -SerialNumber 'SERIAL1', 'SERIAL2'
     .EXAMPLE
@@ -168,7 +168,6 @@ function Get-MosyleDevice {
         if ($Raw) { $result } else { $entry.devices }
         if ($requestOptions.page -eq [int]::MaxValue) { throw 'Mosyle pagination exceeded the supported page range.' }
         $requestOptions.page++
-        Start-Sleep -Seconds 1
     }
 }
 

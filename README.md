@@ -121,12 +121,12 @@ Get-MosyleDevice -OS mac -All -Tag 'Engineering' -PageSize 100
 
 # Search all device pages for an assigned user:
 Get-MosyleDevice -OS mac -All -SpecificColumns device_name,serial_number,userid |
-    Where-Object { $_.userid -eq 'sprice' }
+    Where-Object { $_.userid -eq 'jsmith' }
 ```
 
 `-All` starts at page 1 and preserves the same filters and columns for every
 request. It cannot be combined with `-Page` or `page` in `-Options`.
-Requests are sequential, with a one-second pause before the next page.
+Requests are sequential, with delays only in response to HTTP **429** rate limits.
 Traversal stops on an empty devices array or `DEVICES_NOTFOUND`, not on `rows`
 or a short page: the documentation does not establish total-count semantics.
 This normally requires one final empty-page request.
@@ -195,7 +195,7 @@ filters.** Retrieve them using `-SpecificColumns`, then filter the page locally:
 $devices = @(Get-MosyleDevice -OS mac -SpecificColumns @(
     'device_name', 'serial_number', 'userid', 'HostName', 'LocalHostName'
 ))
-$devices | Where-Object { $_.userid -eq 'sprice' }
+$devices | Where-Object { $_.userid -eq 'jsmith' }
 $devices | Where-Object { $_.HostName -eq 'example-mac' }
 ```
 

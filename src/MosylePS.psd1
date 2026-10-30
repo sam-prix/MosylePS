@@ -2,7 +2,7 @@
     RootModule = 'MosylePS.psm1'
     ModuleVersion = '0.1.0'
     GUID = '7ca89e02-dcf8-476b-adc4-96df4cc75c68'
-    Author = 'Specialized Endpoint Engineering'
+    Author = 'Sam Price'
     Description = 'PowerShell commands for the Mosyle Business API.'
     PowerShellVersion = '5.1'
     CompatiblePSEditions = @('Desktop', 'Core')
